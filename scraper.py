@@ -5,6 +5,12 @@ automation: it is inexpensive to run in GitHub Actions and avoids keeping a
 long-lived browser process.  Automotive marketplaces change their markup and
 may rate-limit automated traffic, so an unavailable source is logged and does
 not prevent the other sources from completing.
+
+The marketplaces used here (CarGurus/Akamai, Autotrader/DataDome,
+Cars.com/Cloudflare) reject the default TLS handshake of a plain HTTP client
+regardless of the User-Agent, so requests are issued through curl_cffi, which
+reproduces a real browser's TLS/HTTP2 fingerprint.  We only read pages that a
+browser would fetch without signing in; no login or CAPTCHA is bypassed.
 """
 
 from __future__ import annotations
@@ -15,26 +21,57 @@ import logging
 import os
 import re
 import smtplib
-import sys
 from dataclasses import dataclass
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urljoin
 
-import requests
+from curl_cffi import requests
+from curl_cffi.requests.exceptions import RequestException
 from bs4 import BeautifulSoup
 
 
 STATE_FILE = Path("seen_vins.json")
 YEARS = {"2025", "2026", "2027"}
-VIN_PATTERN = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b", re.IGNORECASE)
-PRICE_PATTERN = re.compile(r"\$\s*([\d,]+)")
+# A VIN is 17 characters excluding I/O/Q and always mixes letters and digits,
+# so the two lookaheads reject 17-character words (e.g. "SearchResultsPage")
+# and 17-digit numbers that would otherwise be captured as false positives.
+VIN_PATTERN = re.compile(
+    r"\b(?=[A-HJ-NPR-Z0-9]*\d)(?=[A-HJ-NPR-Z0-9]*[A-HJ-NPR-Z])([A-HJ-NPR-Z0-9]{17})\b",
+    re.IGNORECASE,
+)
+PRICE_PATTERN = re.compile(r"\$\s*(\d[\d,]*\d)")
 MILEAGE_PATTERN = re.compile(r"([\d,]+)\s*(?:mi|miles)\b", re.IGNORECASE)
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; CorvetteZ06DealNotifier/1.0; +https://github.com/)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+# Browser profiles for curl_cffi to impersonate.  Anti-bot systems occasionally
+# challenge one fingerprint while allowing another, so we fall back through the
+# list and keep the first response that returns a real page.  safari17_0 is
+# tried first because it currently clears all three sources in one request.
+IMPERSONATE_TARGETS = ("safari17_0", "chrome120", "safari18_0", "chrome110")
+
+# Substrings that identify a challenge/block page served with a 200 status and a
+# larger body than the size check below would catch (some soft blocks are).
+CHALLENGE_MARKERS = (
+    "just a moment",
+    "enable javascript and cookies",
+    "request unsuccessful",
+    "access to this page has been denied",
+    "px-captcha",
+    "captcha-delivery",
+    "verify you are a human",
+    "akamai-block",
+    "page unavailable",
+)
+
+# A real search-results page from these marketplaces is hundreds of kilobytes;
+# challenge/error interstitials are only a few.  Anything below this is treated
+# as a block so fetch() falls through to the next browser fingerprint.
+MIN_PAGE_BYTES = 50_000
 
 
 @dataclass(frozen=True)
@@ -81,6 +118,28 @@ def first_match(pattern: re.Pattern[str], value: str, default: str = "Not listed
     return match.group(1) if match else default
 
 
+def json_ld_scalar(value: Any) -> str:
+    """Coerce a JSON-LD field to a plain string.
+
+    Numeric fields such as ``mileageFromOdometer`` are frequently expressed as a
+    nested ``QuantitativeValue`` ({"value": 12, "unitCode": "SMI"}); return the
+    inner value rather than the stringified dict.
+    """
+    if isinstance(value, dict):
+        value = value.get("value") or value.get("price") or ""
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def format_price(raw: str, default: str = "Not listed") -> str:
+    """Normalise a price string to a ``$``-prefixed value, or a default."""
+    raw = raw.strip()
+    if not raw:
+        return default
+    return raw if raw.startswith("$") else f"${raw}"
+
+
 def json_ld_objects(node: Any) -> Iterable[dict[str, Any]]:
     """Yield every object contained in a JSON-LD script."""
     if isinstance(node, dict):
@@ -105,16 +164,43 @@ def listing_from_json_ld(item: dict[str, Any], source: str, page_url: str) -> Li
     if isinstance(offers, list):
         offers = offers[0] if offers else {}
     offers = offers if isinstance(offers, dict) else {}
-    raw_price = str(offers.get("price") or item.get("price") or "")
-    price = f"${raw_price}" if raw_price and not raw_price.startswith("$") else (raw_price or first_match(PRICE_PATTERN, text))
-    mileage = str(item.get("mileageFromOdometer") or item.get("mileage") or first_match(MILEAGE_PATTERN, text))
+    raw_price = json_ld_scalar(offers.get("price") or item.get("price")) or first_match(PRICE_PATTERN, text, "")
+    price = format_price(raw_price)
+    mileage = json_ld_scalar(item.get("mileageFromOdometer") or item.get("mileage")) \
+        or first_match(MILEAGE_PATTERN, text)
     url = str(offers.get("url") or item.get("url") or page_url)
     return Listing(vin.upper(), price, mileage, urljoin(page_url, url), source, title)
 
 
+def looks_blocked(response: Any) -> bool:
+    """Return True if the response is an anti-bot challenge, not a listing page."""
+    if response.status_code >= 400:
+        return True
+    text = response.text or ""
+    if len(text) < MIN_PAGE_BYTES:
+        return True
+    low = text.lower()
+    return any(marker in low for marker in CHALLENGE_MARKERS)
+
+
+def fetch(url: str) -> Any:
+    """Fetch ``url`` trying each browser fingerprint until one is not blocked."""
+    last_response = None
+    for target in IMPERSONATE_TARGETS:
+        response = requests.get(url, headers=HEADERS, impersonate=target, timeout=30)
+        last_response = response
+        if not looks_blocked(response):
+            return response
+        logging.debug("%s: %s fingerprint was challenged (HTTP %s, %d bytes)",
+                      url, target, response.status_code, len(response.text or ""))
+    # Nothing got through; surface the last status for the caller to log.
+    if last_response is not None:
+        last_response.raise_for_status()
+    raise RequestException(f"No response for {url}")
+
+
 def scrape_source(source: str, url: str) -> list[Listing]:
-    response = requests.get(url, headers=HEADERS, timeout=30)
-    response.raise_for_status()
+    response = fetch(url)
     soup = BeautifulSoup(response.text, "lxml")
     listings: dict[str, Listing] = {}
 
@@ -138,7 +224,8 @@ def scrape_source(source: str, url: str) -> list[Listing]:
         link = element.select_one("a[href]")
         listing_url = urljoin(url, link["href"]) if link else url
         listings[vin.upper()] = Listing(
-            vin.upper(), first_match(PRICE_PATTERN, content), first_match(MILEAGE_PATTERN, content),
+            vin.upper(), format_price(first_match(PRICE_PATTERN, content, "")),
+            first_match(MILEAGE_PATTERN, content),
             listing_url, source, "2025-2027 Chevrolet Corvette Z06",
         )
     logging.info("%s: found %d VIN-bearing listing(s)", source, len(listings))
@@ -185,7 +272,7 @@ def main() -> int:
         try:
             for listing in scrape_source(source, url):
                 discovered[listing.vin] = listing
-        except requests.RequestException as exc:
+        except RequestException as exc:
             logging.warning("%s could not be scraped: %s", source, exc)
         except Exception as exc:  # Keep one marketplace's markup change isolated.
             logging.warning("%s could not be parsed: %s", source, exc)
