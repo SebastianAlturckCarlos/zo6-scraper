@@ -32,16 +32,19 @@ from curl_cffi.requests.exceptions import RequestException
 from bs4 import BeautifulSoup
 
 
-STATE_FILE = Path("lowest_price.json")
+STATE_FILE = Path("seen_vins.json")
 YEARS = {2025, 2026, 2027}
 # VIN position 10 (model year) for the years we track.  For a Corvette these are
 # unambiguous: the Z06 badge did not exist before 2001, so S/T/V cannot mean
 # 1995-1997.
 VIN_YEAR_CODES = {"S": 2025, "T": 2026, "V": 2027}
-# VIN position 5 (car line / trim) for the C8 Z06 (1LZ/2LZ/3LZ).  Base Stingrays
-# use A/B/C and are excluded; this is only consulted for cars already confirmed
-# to be a tracked model year, where these codes reliably mean Z06.
-C8_Z06_TRIM = {"D", "E", "F"}
+# The exact spec we alert on: a C8 Z06 in 2LZ or 3LZ trim, coupe body, any year
+# in YEARS, any colour.  All three are read from the VIN, validated against the
+# marketplaces' own labels:
+#   position 5 (trim): D=1LZ, E=2LZ, F=3LZ  (base Stingrays use A/B/C)
+#   position 6 (body): 2=coupe, 3=convertible
+Z06_COUPE_TRIMS = {"E": "2LZ", "F": "3LZ"}
+COUPE_BODY_CODE = "2"
 # A VIN is 17 characters excluding I/O/Q and always mixes letters and digits,
 # so the two lookaheads reject 17-character words (e.g. "SearchResultsPage")
 # and 17-digit numbers that would otherwise be captured as false positives.
@@ -101,30 +104,24 @@ SOURCES = {
 }
 
 
-def load_lowest_price() -> int | None:
-    """Return the lowest price alerted so far, or None if there is no record."""
+def load_seen_vins() -> set[str]:
+    """Load the set of VINs already alerted on (empty if there is no state)."""
     if not STATE_FILE.exists():
-        return None
+        return set()
     try:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        price = data.get("price") if isinstance(data, dict) else None
-        return int(price) if isinstance(price, (int, float)) and price > 0 else None
+        if isinstance(data, dict):
+            data = data.get("vins", [])
+        if not isinstance(data, list):
+            raise ValueError("state is not a JSON list")
+        return {str(vin).upper() for vin in data if VIN_PATTERN.fullmatch(str(vin).upper())}
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        logging.warning("Could not read %s: %s. Starting with no record.", STATE_FILE, exc)
-        return None
+        logging.warning("Could not read %s: %s. Starting with an empty state.", STATE_FILE, exc)
+        return set()
 
 
-def save_lowest_price(listing: Listing, price: int) -> None:
-    """Persist the cheapest listing so future runs only alert on a lower price."""
-    record = {
-        "price": price,
-        "vin": listing.vin,
-        "source": listing.source,
-        "title": listing.title,
-        "mileage": listing.mileage,
-        "url": listing.url,
-    }
-    STATE_FILE.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+def save_seen_vins(vins: set[str]) -> None:
+    STATE_FILE.write_text(json.dumps(sorted(vins), indent=2) + "\n", encoding="utf-8")
 
 
 def first_match(pattern: re.Pattern[str], value: str, default: str = "Not listed") -> str:
@@ -154,32 +151,27 @@ def format_price(raw: str, default: str = "Not listed") -> str:
     return raw if raw.startswith("$") else f"${raw}"
 
 
-def price_value(price: str) -> int | None:
-    """Parse a formatted price string to a positive integer, or None."""
-    match = re.search(r"(\d[\d,]*)", price or "")
-    if not match:
-        return None
-    value = int(match.group(1).replace(",", ""))
-    return value if value > 0 else None
-
-
 def vin_model_year(vin: str) -> int | None:
     """Model year from VIN position 10, limited to the years we track."""
     return VIN_YEAR_CODES.get(vin[9].upper()) if len(vin) >= 17 else None
 
 
-def is_target_z06(vin: str, name: str) -> bool:
-    """True only for a 2025-2027 Corvette Z06.
+def spec_trim(vin: str, labels: str = "") -> str | None:
+    """Return "2LZ"/"3LZ" if the VIN is a 2025-2027 Z06 2LZ/3LZ coupe, else None.
 
-    Model year comes from the VIN (position 10), which is present and reliable on
-    every listing.  The Z06 trim is confirmed by the listing name where the site
-    labels it (Autotrader) or, where it does not (CarGurus lists all Corvettes
-    generically), by the C8 Z06 trim code in VIN position 5 -- which excludes the
-    base Stingrays that otherwise dominate the cheap end.
+    Every character we need is in the VIN and is validated against the sites' own
+    labels: position 10 (year), position 5 (trim: E=2LZ, F=3LZ), position 6
+    (body: 2=coupe).  ``labels`` is any name/description text used only to exclude
+    the E-Ray and ZR1, which share the LZ trim names but are different models.
     """
-    if vin_model_year(vin) not in YEARS:
-        return False
-    return "z06" in name.lower() or vin[4].upper() in C8_Z06_TRIM
+    if len(vin) < 17 or vin_model_year(vin) not in YEARS:
+        return None
+    text = labels.lower()
+    if "e-ray" in text or "eray" in text or "zr1" in text:
+        return None
+    if vin[5] != COUPE_BODY_CODE:  # exclude convertibles
+        return None
+    return Z06_COUPE_TRIMS.get(vin[4].upper())
 
 
 def json_ld_objects(node: Any) -> Iterable[dict[str, Any]]:
@@ -196,12 +188,11 @@ def json_ld_objects(node: Any) -> Iterable[dict[str, Any]]:
 def listing_from_json_ld(item: dict[str, Any], source: str, page_url: str) -> Listing | None:
     text = json.dumps(item)
     vin = first_match(VIN_PATTERN, text, "")
-    # Detect on the real name only; a Z06-containing default would defeat the
-    # trim check for sources (CarGurus) that name listings generically.
-    name = str(item.get("name") or item.get("model") or "")
-    if not vin or not is_target_z06(vin, name):
+    labels = " ".join(str(item.get(k) or "") for k in ("name", "model", "vehicleConfiguration", "description"))
+    trim = spec_trim(vin, labels) if vin else None
+    if not trim:
         return None
-    title = name or f"{vin_model_year(vin)} Chevrolet Corvette Z06"
+    title = f"{vin_model_year(vin)} Chevrolet Corvette Z06 {trim} Coupe"
     offers = item.get("offers", {})
     if isinstance(offers, list):
         offers = offers[0] if offers else {}
@@ -271,48 +262,45 @@ def scrape_source(source: str, url: str) -> list[Listing]:
     for element in soup.select("article, li, .listing, [data-listing-id], [data-vin]"):
         content = element.get_text(" ", strip=True)
         vin = first_match(VIN_PATTERN, content, "")
-        if not vin or "corvette" not in content.lower() or not is_target_z06(vin, content):
+        trim = spec_trim(vin, content) if vin else None
+        if not trim or "corvette" not in content.lower():
             continue
         link = element.select_one("a[href]")
         listing_url = urljoin(url, link["href"]) if link else url
         listings[vin.upper()] = Listing(
             vin.upper(), format_price(first_match(PRICE_PATTERN, content, "")),
             first_match(MILEAGE_PATTERN, content),
-            listing_url, source, f"{vin_model_year(vin)} Chevrolet Corvette Z06",
+            listing_url, source, f"{vin_model_year(vin)} Chevrolet Corvette Z06 {trim} Coupe",
         )
-    logging.info("%s: found %d target Z06 listing(s)", source, len(listings))
+    logging.info("%s: found %d matching Z06 2LZ/3LZ coupe(s)", source, len(listings))
     return list(listings.values())
 
 
-def send_alert(car: Listing, price: int, previous: int | None) -> None:
+def send_alert(listings: list[Listing]) -> None:
     sender = os.environ.get("GMAIL_ADDRESS")
     password = os.environ.get("GMAIL_APP_PASSWORD")
     recipient = os.environ.get("TARGET_EMAIL")
     if not all((sender, password, recipient)):
         raise RuntimeError("GMAIL_ADDRESS, GMAIL_APP_PASSWORD, and TARGET_EMAIL must be configured")
 
-    if previous is None:
-        headline = f"Cheapest 2025-2027 Corvette Z06 right now: ${price:,}"
-        context = "This is the first alert, showing the lowest-priced listing found today."
-    else:
-        headline = f"New low for a 2025-2027 Corvette Z06: ${price:,}"
-        context = f"Down ${previous - price:,} from the previous low of ${previous:,}."
-
-    rows = (
+    count = len(listings)
+    headline = f"{count} new Corvette Z06 2LZ/3LZ coupe listing(s)"
+    rows = "".join(
         "<tr>"
         f"<td>{html.escape(car.source)}</td><td>{html.escape(car.title)}</td>"
         f"<td>{html.escape(car.vin)}</td><td>{html.escape(car.price)}</td>"
         f"<td>{html.escape(car.mileage)}</td>"
         f'<td><a href="{html.escape(car.url, quote=True)}">View listing</a></td>'
         "</tr>"
+        for car in listings
     )
     message = EmailMessage()
     message["Subject"] = headline
     message["From"] = sender
     message["To"] = recipient
-    message.set_content(f"{headline}\n{context}\nView this message in an HTML-capable email client.")
+    message.set_content(f"{headline}. View this message in an HTML-capable email client.")
     message.add_alternative(
-        f"<html><body><h2>{html.escape(headline)}</h2><p>{html.escape(context)}</p>"
+        f"<html><body><h2>{html.escape(headline)}</h2>"
         "<table border='1' cellpadding='7' cellspacing='0'><thead><tr>"
         "<th>Source</th><th>Vehicle</th><th>VIN</th><th>Price</th><th>Mileage</th><th>Link</th>"
         f"</tr></thead><tbody>{rows}</tbody></table></body></html>", subtype="html"
@@ -324,6 +312,7 @@ def send_alert(car: Listing, price: int, previous: int | None) -> None:
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    seen = load_seen_vins()
     discovered: dict[str, Listing] = {}
     for source, url in SOURCES.items():
         try:
@@ -334,22 +323,13 @@ def main() -> int:
         except Exception as exc:  # Keep one marketplace's markup change isolated.
             logging.warning("%s could not be parsed: %s", source, exc)
 
-    # Consider only listings with a usable price and take the cheapest.
-    priced = [(price_value(listing.price), listing) for listing in discovered.values()]
-    priced = [(value, listing) for value, listing in priced if value is not None]
-    if not priced:
-        logging.info("No priced 2025-2027 Z06 listings found.")
+    new_listings = [listing for vin, listing in discovered.items() if vin not in seen]
+    if not new_listings:
+        logging.info("No new Z06 2LZ/3LZ coupes found (%d matched, all already seen).", len(discovered))
         return 0
-    price, cheapest = min(priced, key=lambda item: item[0])
-
-    previous = load_lowest_price()
-    if previous is not None and price >= previous:
-        logging.info("Cheapest listing $%s is not below the recorded low $%s; no alert.", price, previous)
-        return 0
-
-    send_alert(cheapest, price, previous)
-    save_lowest_price(cheapest, price)
-    logging.info("Alert sent: $%s (%s). Previous low: %s.", price, cheapest.vin, previous)
+    send_alert(new_listings)
+    save_seen_vins(seen | set(discovered))
+    logging.info("Alert sent for %d new listing(s); %d VIN(s) now tracked.", len(new_listings), len(seen | set(discovered)))
     return 0
 
 

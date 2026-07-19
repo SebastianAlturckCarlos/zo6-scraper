@@ -35,14 +35,14 @@ jobs:
           SCRAPER_PROXY: ${{ secrets.SCRAPER_PROXY }}
         run: python scraper.py
 
-      - name: Save updated lowest price
+      - name: Save updated seen VINs
         run: |
-          if [ -z "$(git status --porcelain -- lowest_price.json)" ]; then
+          if [ -z "$(git status --porcelain -- seen_vins.json)" ]; then
             echo "No state changes to commit."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add lowest_price.json
-          git commit -m "chore: update lowest Corvette Z06 price"
+          git add seen_vins.json
+          git commit -m "chore: update seen Corvette Z06 VINs"
           git push

@@ -1,24 +1,26 @@
 # Corvette Z06 deal scraper
 
-Checks automotive marketplaces for 2025–2027 Chevrolet Corvette Z06s and emails
-an alert **only when the cheapest one found beats the lowest price seen so far**.
-Runs on GitHub Actions every six hours — four times a day (and on demand via
-**Actions → Corvette Z06 deal scraper → Run workflow**).
+Checks automotive marketplaces for one exact spec — a **Chevrolet Corvette Z06
+in 2LZ or 3LZ trim, coupe body, model year 2025–2027, any colour** — and emails
+an alert listing **any new ones** since the last run. Runs on GitHub Actions
+every six hours — four times a day (and on demand via **Actions → Corvette Z06
+deal scraper → Run workflow**).
 
 ## How it works
 
 `scraper.py` fetches each search page and extracts listings (VIN, price,
 mileage, link), primarily from the JSON-LD structured data the sites embed. It
-keeps only genuine **2025–2027 Z06s**: the model year comes from the VIN (a
-Corvette with VIN model-year code S/T/V), and the Z06 trim is confirmed either
-from the listing name or from the C8 Z06 trim code in the VIN — this excludes
-older Corvettes and base Stingrays that the marketplace searches also return.
+keeps only listings matching the exact spec, decoded from the VIN (which every
+listing carries) and cross-checked against the sites' own labels:
 
-Among those, it takes the cheapest with a usable price and compares it to
-`lowest_price.json`. If it is lower than the recorded low (or there is no record
-yet, as on the first run), it emails that one listing and saves the new low. The
-workflow commits `lowest_price.json` back to the repo so the record persists
-between runs. No email is sent on runs where nothing beats the record.
+- **position 10** — model year: `S`/`T`/`V` = 2025/2026/2027
+- **position 5** — trim: `E` = 2LZ, `F` = 3LZ (`D` = 1LZ and Stingrays A/B/C are excluded)
+- **position 6** — body: `2` = coupe (`3` = convertible, excluded)
+
+E-Ray and ZR1 (which reuse the LZ trim names) are excluded by name. Matching
+VINs are compared against `seen_vins.json`; any not seen before are emailed and
+then added to it. The workflow commits `seen_vins.json` back to the repo so the
+record persists between runs. **No email is sent when there is nothing new.**
 
 Requests go through [`curl_cffi`](https://github.com/lexiforest/curl_cffi) with
 a real browser's TLS fingerprint, because these marketplaces reject an ordinary
