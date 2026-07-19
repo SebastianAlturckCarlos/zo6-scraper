@@ -1,16 +1,24 @@
 # Corvette Z06 deal scraper
 
-Checks automotive marketplaces for newly listed 2025–2027 Chevrolet Corvette
-Z06s and emails an alert when new VINs appear. Runs on GitHub Actions every six
-hours (and on demand via **Actions → Corvette Z06 deal scraper → Run workflow**).
+Checks automotive marketplaces for 2025–2027 Chevrolet Corvette Z06s and emails
+an alert **only when the cheapest one found beats the lowest price seen so far**.
+Runs on GitHub Actions every six hours — four times a day (and on demand via
+**Actions → Corvette Z06 deal scraper → Run workflow**).
 
 ## How it works
 
-`scraper.py` fetches each search page, extracts listings (VIN, price, mileage,
-link) primarily from the JSON-LD structured data the sites embed, drops VINs it
-has already reported, and emails any new ones. Reported VINs are stored in
-`seen_vins.json`, which the workflow commits back to the repo after each run so
-alerts are not repeated.
+`scraper.py` fetches each search page and extracts listings (VIN, price,
+mileage, link), primarily from the JSON-LD structured data the sites embed. It
+keeps only genuine **2025–2027 Z06s**: the model year comes from the VIN (a
+Corvette with VIN model-year code S/T/V), and the Z06 trim is confirmed either
+from the listing name or from the C8 Z06 trim code in the VIN — this excludes
+older Corvettes and base Stingrays that the marketplace searches also return.
+
+Among those, it takes the cheapest with a usable price and compares it to
+`lowest_price.json`. If it is lower than the recorded low (or there is no record
+yet, as on the first run), it emails that one listing and saves the new low. The
+workflow commits `lowest_price.json` back to the repo so the record persists
+between runs. No email is sent on runs where nothing beats the record.
 
 Requests go through [`curl_cffi`](https://github.com/lexiforest/curl_cffi) with
 a real browser's TLS fingerprint, because these marketplaces reject an ordinary
