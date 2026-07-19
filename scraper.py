@@ -184,10 +184,20 @@ def looks_blocked(response: Any) -> bool:
 
 
 def fetch(url: str) -> Any:
-    """Fetch ``url`` trying each browser fingerprint until one is not blocked."""
+    """Fetch ``url`` trying each browser fingerprint until one is not blocked.
+
+    Cloudflare and Akamai also block by IP reputation, which no TLS fingerprint
+    can defeat: GitHub Actions runs from datacenter IP ranges that some sources
+    reject outright.  Setting the SCRAPER_PROXY environment variable (e.g. a
+    residential proxy URL) routes requests through it so those sources work from
+    CI; when unset, requests go out directly and behaviour is unchanged.
+    """
+    proxy = os.environ.get("SCRAPER_PROXY") or None
+    proxies = {"http": proxy, "https": proxy} if proxy else None
     last_response = None
     for target in IMPERSONATE_TARGETS:
-        response = requests.get(url, headers=HEADERS, impersonate=target, timeout=30)
+        response = requests.get(url, headers=HEADERS, impersonate=target,
+                                proxies=proxies, timeout=30)
         last_response = response
         if not looks_blocked(response):
             return response

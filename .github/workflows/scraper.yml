@@ -29,6 +29,10 @@ jobs:
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           TARGET_EMAIL: ${{ secrets.TARGET_EMAIL }}
+          # Optional: set this secret to a residential proxy URL to reach sources
+          # (e.g. Cars.com) that block GitHub's datacenter IPs. Left unset, the
+          # scraper runs fine on the sources that do not IP-block CI.
+          SCRAPER_PROXY: ${{ secrets.SCRAPER_PROXY }}
         run: python scraper.py
 
       - name: Save updated seen VINs
