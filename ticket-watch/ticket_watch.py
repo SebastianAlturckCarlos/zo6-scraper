@@ -1,14 +1,18 @@
-"""Watch AXS ticket prices for one event and email when they move.
+"""Watch ticket prices for one event and email when they move.
 
 Self-contained and unrelated to the Corvette scraper in the repository root:
 it has its own requirements file, its own state file, and its own workflow.
 
-Only the public event page is read -- the same document a browser loads before
-signing in.  Nothing here logs in, holds a cart, defeats a CAPTCHA, or buys a
-ticket; it is a read-only price watcher that makes one request per run.  AXS
-sits behind an anti-bot layer that rejects a default HTTP client's TLS
-handshake regardless of User-Agent, so requests go out through curl_cffi, which
-reproduces a real browser's TLS/HTTP2 fingerprint.
+Prices are read from several sites for the same show -- the AXS primary page
+plus resale mirrors -- because AXS returns 403 to datacenter IPs and a watcher
+with one source is one block away from being useless.  Each source is fetched,
+parsed, and reported independently; a source that fails is logged and skipped
+rather than sinking the run.
+
+Only public pages are read: the same documents a browser loads before signing
+in.  Nothing here logs in, holds a cart, defeats a CAPTCHA, or buys a ticket.
+Requests go out through curl_cffi, which reproduces a real browser's TLS/HTTP2
+fingerprint, and optionally retry in headless Chromium when USE_BROWSER=1.
 """
 
 from __future__ import annotations
@@ -32,14 +36,33 @@ from bs4 import BeautifulSoup
 
 
 # Coors Light Hot Country Nights: Tucker Wetmore, Kansas City Live! at the
-# Power & Light District, Thu 13 Aug 2026.  Override with EVENT_URL to watch a
-# different event; EVENT_NAME only affects the email subject line.
+# Power & Light District, Thu 13 Aug 2026.  Override the primary page with
+# EVENT_URL; EVENT_NAME only affects the email subject line.
 DEFAULT_EVENT_URL = (
     "https://www.axs.com/events/1378791/"
     "coors-light-hot-country-nights-tucker-wetmore-tickets"
 )
 DEFAULT_EVENT_NAME = "Tucker Wetmore - Hot Country Nights, KC Live! (Thu Aug 13)"
 DEFAULT_RECIPIENT = "sebastianrhoton@gmail.com"
+
+# The same event on several sites.  AXS is the primary and the one that matters
+# for what you actually pay, but it also blocks datacenter IPs outright, so a
+# run that only reads AXS is one 403 away from being useless.  The resale
+# mirrors are not a substitute for the primary price -- they are a different
+# and independently useful signal, because a resale floor drifting *down*
+# toward face is the clearest evidence that a show is not going to sell out.
+# Each source is read and reported separately; one failing never blocks another.
+SOURCES: dict[str, str] = {
+    "AXS": DEFAULT_EVENT_URL,
+    "SeatGeek": (
+        "https://seatgeek.com/tucker-wetmore-tickets/"
+        "kansas-city-missouri-kansas-city-live-1-2026-08-13-7-pm/concert/18136990"
+    ),
+    "VividSeats": (
+        "https://www.vividseats.com/tucker-wetmore-tickets-kansas-city-"
+        "kansas-city-live-8-13-2026/production/6806730"
+    ),
+}
 
 STATE_FILE = Path(__file__).with_name("ticket_prices.json")
 # Append-only snapshot log.  Nobody publishes how fast an event is selling, so
@@ -225,6 +248,41 @@ def looks_blocked(response: Any) -> bool:
     return any(marker in low for marker in CHALLENGE_MARKERS)
 
 
+def browser_fetch(url: str) -> str:
+    """Load ``url`` in a real headless Chromium and return the rendered HTML.
+
+    curl_cffi copies a browser's TLS fingerprint but cannot execute the
+    JavaScript some anti-bot layers require before serving the page.  A real
+    browser can, which clears that class of 403 -- though not a block based on
+    IP reputation, where nothing running from the same address will help.
+
+    Opt in with USE_BROWSER=1; if Playwright is not installed the caller falls
+    back to the plain HTTP result.
+    """
+    from playwright.sync_api import sync_playwright  # optional dependency
+
+    proxy = os.environ.get("TICKET_PROXY") or None
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            proxy={"server": proxy} if proxy else None,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        try:
+            page = browser.new_page(
+                locale="en-US",
+                timezone_id="America/Chicago",
+                viewport={"width": 1440, "height": 900},
+            )
+            page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+            # Anti-bot interstitials resolve themselves a beat after load, and
+            # prices are often injected after the initial paint.
+            page.wait_for_timeout(6_000)
+            return page.content()
+        finally:
+            browser.close()
+
+
 def fetch(url: str) -> str:
     """Return the event page, trying each fingerprint until one is not blocked.
 
@@ -245,6 +303,23 @@ def fetch(url: str) -> str:
         logging.debug("%s fingerprint challenged (HTTP %s, %d bytes)",
                       target, response.status_code, len(response.text or ""))
     status = last.status_code if last is not None else "no response"
+
+    if os.environ.get("USE_BROWSER") == "1":
+        logging.info("HTTP was blocked (last status: %s); retrying in Chromium.", status)
+        try:
+            rendered = browser_fetch(url)
+        except ImportError:
+            logging.warning("USE_BROWSER=1 but Playwright is not installed.")
+        except Exception as exc:
+            logging.warning("Browser fetch also failed: %s", exc)
+        else:
+            low = rendered.lower()
+            if len(rendered) >= MIN_PAGE_BYTES and not any(
+                    marker in low for marker in CHALLENGE_MARKERS):
+                return rendered
+            logging.warning("Browser fetch returned a challenge page (%d bytes).",
+                            len(rendered))
+
     raise RequestException(f"every fingerprint was blocked (last status: {status})")
 
 
@@ -498,14 +573,15 @@ def target_reached_email(event_name: str, event_url: str, cheapest: float,
 
 def failure_email(event_name: str, event_url: str, failures: int,
                   reason: str) -> tuple[str, str, str]:
-    headline = f"Ticket watcher cannot read the AXS page ({failures} tries in a row)"
+    headline = f"Ticket watcher cannot read any source ({failures} tries in a row)"
     body_html = (
         f"<html><body><h2>{html.escape(headline)}</h2>"
         f"<p>{html.escape(event_name)}</p>"
         f"<p>Last error: {html.escape(reason)}</p>"
         "<p>Prices are <strong>not</strong> being monitored until this clears. "
-        "AXS is most likely blocking the CI runner's IP; set the TICKET_PROXY "
-        "secret to a residential proxy, or check the page by hand.</p>"
+        "Every source is most likely blocking the runner's IP; set the "
+        "TICKET_PROXY secret to a residential proxy, run the watcher from your "
+        "own machine, or check the page by hand.</p>"
         f"<p><a href=\"{html.escape(event_url, quote=True)}\">Open the AXS event page</a></p>"
         "</body></html>"
     )
@@ -527,39 +603,64 @@ def main() -> int:
     if args.history:
         return summarise_history()
 
+    # --show and --dry-run both inspect without side effects: no mail, and no
+    # writes to the state or history files.
+    read_only = args.dry_run or args.show
+
     event_url = os.environ.get("EVENT_URL") or DEFAULT_EVENT_URL
     event_name = os.environ.get("EVENT_NAME") or DEFAULT_EVENT_NAME
     threshold = parse_setting(os.environ.get("PRICE_CHANGE_THRESHOLD")) or DEFAULT_THRESHOLD
     target = parse_setting(os.environ.get("PRICE_TARGET"))
 
     state = load_state()
-    try:
-        page = fetch(event_url)
-    except Exception as exc:  # one bad read must not fail the whole run
+    sources = dict(SOURCES)
+    sources["AXS"] = event_url
+
+    offers: dict[str, Offer] = {}
+    errors: dict[str, str] = {}
+    for source, url in sources.items():
+        try:
+            found = extract_offers(fetch(url))
+        except Exception as exc:  # one blocked site must not sink the others
+            errors[source] = str(exc)
+            logging.warning("%s could not be read: %s", source, exc)
+            continue
+        if not found:
+            errors[source] = "page loaded but no prices could be parsed"
+            logging.warning("%s: no prices found; markup may have changed.", source)
+        # Namespace by source so "AXS: General Admission" and the resale floors
+        # are tracked, diffed, and reported as separate series.
+        for label, offer in found.items():
+            offers[f"{source}: {label}"] = offer
+        logging.info("%s: %d price(s).", source, len(found))
+
+    if not offers:
+        if args.show:  # --show reports the blocks rather than exiting silently
+            for source, error in errors.items():
+                print(f"{'BLOCKED':>10}  {source}: {error}")
         failures = int(state.get("consecutive_failures") or 0) + 1
-        logging.warning("Could not read the event page (%d in a row): %s", failures, exc)
+        reason = "; ".join(f"{source}: {error}" for source, error in errors.items())
+        logging.warning("No source could be read (%d in a row): %s", failures, reason)
         state["consecutive_failures"] = failures
-        state["last_error"] = str(exc)
+        state["last_error"] = reason
         state["last_checked"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        if not args.dry_run:
+        if not read_only:
             if should_warn(failures):
-                send_email(*failure_email(event_name, event_url, failures, str(exc)))
+                send_email(*failure_email(event_name, event_url, failures, reason))
             # The counter only survives because the workflow commits this file;
             # without that every run would restart at 1 and never warn at all.
             save_state(state)
         return 0
 
-    offers = extract_offers(page)
     current = {label: offer.price for label, offer in offers.items()}
     cheapest = min(current.values()) if current else None
 
-    if args.show or not current:
+    if args.show:
         for label, price in sorted(current.items(), key=lambda pair: pair[1]):
             print(f"{money(price):>10}  {label}")
-        if not current:
-            logging.warning("No prices found on the page; markup may have changed.")
-        if args.show:
-            return 0
+        for source, error in errors.items():
+            print(f"{'BLOCKED':>10}  {source}: {error}")
+        return 0
 
     now = datetime.now(timezone.utc)
     previous = previous_offers(state)
@@ -575,7 +676,7 @@ def main() -> int:
                      len(current), money(cheapest) if cheapest is not None else "n/a")
     elif changes:
         logging.info("%d change(s) detected.", len(changes))
-        if not args.dry_run:
+        if not read_only:
             send_email(*price_change_email(event_name, event_url, changes, cheapest, held))
     else:
         logging.info("No change beyond %s (cheapest %s).", money(threshold),
@@ -585,13 +686,13 @@ def main() -> int:
         already = parse_price(state.get("target_notified_at_price"))
         # Re-notify only if it dropped further, not on every run while under.
         if already is None or cheapest < already:
-            if not args.dry_run:
+            if not read_only:
                 send_email(*target_reached_email(event_name, event_url, cheapest, target))
             state["target_notified_at_price"] = cheapest
     elif target is not None:
         state.pop("target_notified_at_price", None)
 
-    if args.dry_run:
+    if read_only:
         for change in changes:
             print(f"would report: {change.label}: {change.old} -> {change.new}")
         return 0

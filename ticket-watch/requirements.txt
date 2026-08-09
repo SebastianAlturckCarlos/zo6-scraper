@@ -1,3 +1,7 @@
 curl_cffi>=0.7,<1
 beautifulsoup4>=4.12,<5
 lxml>=5.0,<7
+# Only used when USE_BROWSER=1, to retry a page that plain HTTP could not get
+# past.  The import is optional at runtime: without it the watcher still works,
+# it just has one less way through an anti-bot challenge.
+playwright>=1.40,<2
