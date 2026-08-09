@@ -643,6 +643,35 @@ def failure_email(event_name: str, event_url: str, failures: int,
     return headline, body_html, f"{headline}\n{event_name}\nLast error: {reason}\n{event_url}"
 
 
+def test_email(event_name: str, event_url: str, state: dict[str, Any]) -> tuple[str, str, str]:
+    """A sample alert, so the mail path can be proved without waiting for a move.
+
+    Built from the real tracked series where there is one, with an invented
+    change applied, so it looks exactly like the alert it is standing in for.
+    """
+    tracked = previous_offers(state)
+    if tracked:
+        label, price = min(tracked.items(), key=lambda pair: pair[1])
+        changes = [Change(label, price, round(price - 7.0, 2))]
+        held = {label: held_for(stored_since(state).get(label), datetime.now(timezone.utc))}
+        cheapest: float | None = round(price - 7.0, 2)
+    else:
+        changes = [Change("Example: General Admission", 62.00, 55.00)]
+        held = {"Example: General Admission": "6h 12m"}
+        cheapest = 55.00
+
+    _, body_html, body_text = price_change_email(event_name, event_url, changes, cheapest, held)
+    banner = (
+        "<p style='background:#fff3cd;border:1px solid #ffe08a;padding:10px'>"
+        "<strong>This is a test.</strong> The price change below is invented to "
+        "prove the alert path works. Real alerts look exactly like this, minus "
+        "this banner.</p>"
+    )
+    body_html = body_html.replace("<body>", "<body>" + banner, 1)
+    subject = f"[TEST] Ticket watcher is working - {event_name}"
+    return subject, body_html, "THIS IS A TEST - the change below is invented.\n\n" + body_text
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true",
@@ -651,6 +680,8 @@ def main() -> int:
                         help="print the prices found and exit without comparing")
     parser.add_argument("--history", action="store_true",
                         help="summarise the recorded snapshots and exit (no network)")
+    parser.add_argument("--test-email", action="store_true",
+                        help="send one sample alert to prove the mail path, then exit")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -666,6 +697,11 @@ def main() -> int:
     event_name = os.environ.get("EVENT_NAME") or DEFAULT_EVENT_NAME
     threshold = parse_setting(os.environ.get("PRICE_CHANGE_THRESHOLD")) or DEFAULT_THRESHOLD
     target = parse_setting(os.environ.get("PRICE_TARGET"))
+
+    if args.test_email:
+        # No fetching: this proves SMTP and the recipient, nothing else.
+        send_email(*test_email(event_name, event_url, load_state()))
+        return 0
 
     state = load_state()
     sources = dict(SOURCES)

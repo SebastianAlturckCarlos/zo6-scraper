@@ -6,6 +6,11 @@ on:
     # as "about twice an hour" rather than an exact clock.
     - cron: "*/30 * * * *"
   workflow_dispatch:
+    inputs:
+      test_email:
+        description: "Send one sample alert to prove the mail path, then stop"
+        type: boolean
+        default: false
 
 # Two scheduled workflows in this repository commit state files; without this
 # the second one to finish can clobber or fail against the first.
@@ -51,7 +56,7 @@ jobs:
           PRICE_TARGET: ${{ vars.PRICE_TARGET }}
           # Optional: residential proxy URL, for when AXS blocks the runner IP.
           TICKET_PROXY: ${{ secrets.TICKET_PROXY }}
-        run: python ticket-watch/ticket_watch.py
+        run: python ticket-watch/ticket_watch.py ${{ inputs.test_email && '--test-email' || '' }}
 
       - name: Save the recorded prices
         run: |
