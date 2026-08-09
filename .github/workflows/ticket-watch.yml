@@ -1,0 +1,67 @@
+name: AXS ticket price watch
+
+on:
+  schedule:
+    # Every 30 minutes. GitHub delays scheduled runs under load, so treat this
+    # as "about twice an hour" rather than an exact clock.
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+# Two scheduled workflows in this repository commit state files; without this
+# the second one to finish can clobber or fail against the first.
+concurrency:
+  group: repo-state-commit
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: ticket-watch/requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r ticket-watch/requirements.txt
+
+      - name: Check ticket prices and email on a change
+        env:
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          # Defaults to sebastianrhoton@gmail.com when the secret is unset.
+          TICKET_ALERT_EMAIL: ${{ secrets.TICKET_ALERT_EMAIL }}
+          # Optional overrides - see ticket-watch/README.md.
+          EVENT_URL: ${{ vars.EVENT_URL }}
+          EVENT_NAME: ${{ vars.EVENT_NAME }}
+          PRICE_CHANGE_THRESHOLD: ${{ vars.PRICE_CHANGE_THRESHOLD }}
+          PRICE_TARGET: ${{ vars.PRICE_TARGET }}
+          # Optional: residential proxy URL, for when AXS blocks the runner IP.
+          TICKET_PROXY: ${{ secrets.TICKET_PROXY }}
+        run: python ticket-watch/ticket_watch.py
+
+      - name: Save the recorded prices
+        run: |
+          if [ -z "$(git status --porcelain -- ticket-watch/ticket_prices.json)" ]; then
+            echo "No price changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ticket-watch/ticket_prices.json
+          git commit -m "chore: update watched AXS ticket prices"
+          for attempt in 1 2 3 4; do
+            if git push; then exit 0; fi
+            echo "Push failed (attempt $attempt); rebasing on the remote and retrying."
+            sleep $((2 ** attempt))
+            git pull --rebase
+          done
+          exit 1
