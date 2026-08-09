@@ -57,7 +57,11 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add $state
+          # On a failed read only the state file is written, so add each path
+          # that actually exists: "git add" hard-errors on a missing pathspec.
+          for path in $state; do
+            if [ -f "$path" ]; then git add "$path"; fi
+          done
           git commit -m "chore: update watched AXS ticket prices"
           for attempt in 1 2 3 4; do
             if git push; then exit 0; fi

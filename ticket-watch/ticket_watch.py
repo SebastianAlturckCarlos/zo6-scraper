@@ -54,6 +54,10 @@ DEFAULT_THRESHOLD = 1.00
 # silent watcher is worse than a noisy one when the show is days away, but a
 # single blocked request is routine, so warn only once a pattern is clear.
 FAILURES_BEFORE_WARNING = 3
+# After that first warning the cause is known and unchanging (an IP block does
+# not clear itself), so repeat only about once a day at a 30-minute cadence
+# rather than every third run.
+FAILURE_REMINDER_EVERY = 48
 
 HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -269,6 +273,17 @@ def previous_offers(state: dict[str, Any]) -> dict[str, float]:
         if price is not None:
             prices[str(label)] = price
     return prices
+
+
+def should_warn(failures: int) -> bool:
+    """Warn once the streak is established, then about daily, not every run.
+
+    A blocked IP stays blocked, so repeating the same warning every 90 minutes
+    for three days would be dozens of identical emails.
+    """
+    if failures < FAILURES_BEFORE_WARNING:
+        return False
+    return failures == FAILURES_BEFORE_WARNING or failures % FAILURE_REMINDER_EVERY == 0
 
 
 def stored_since(state: dict[str, Any]) -> dict[str, str]:
@@ -526,11 +541,11 @@ def main() -> int:
         state["consecutive_failures"] = failures
         state["last_error"] = str(exc)
         state["last_checked"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        # Warn once when the streak starts, then every further multiple, so a
-        # long outage does not mail on every single run.
         if not args.dry_run:
-            if failures % FAILURES_BEFORE_WARNING == 0:
+            if should_warn(failures):
                 send_email(*failure_email(event_name, event_url, failures, str(exc)))
+            # The counter only survives because the workflow commits this file;
+            # without that every run would restart at 1 and never warn at all.
             save_state(state)
         return 0
 

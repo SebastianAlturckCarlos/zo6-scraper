@@ -97,6 +97,17 @@ class BlockDetection(unittest.TestCase):
         self.assertFalse(tw.looks_blocked(self.FakeResponse(200, "ticket " * 10_000)))
 
 
+class FailureWarnings(unittest.TestCase):
+    def test_silent_until_the_streak_is_established(self):
+        self.assertFalse(tw.should_warn(1))
+        self.assertFalse(tw.should_warn(2))
+        self.assertTrue(tw.should_warn(3))
+
+    def test_then_about_daily_rather_than_every_run(self):
+        # A blocked IP stays blocked; 4..47 must not each send an email.
+        self.assertEqual([n for n in range(4, 100) if tw.should_warn(n)], [48, 96])
+
+
 class Durations(unittest.TestCase):
     def test_formats_minutes_hours_and_days(self):
         self.assertEqual(tw.format_duration(45 * 60), "45m")
