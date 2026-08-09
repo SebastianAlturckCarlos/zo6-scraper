@@ -262,6 +262,26 @@ def browser_fetch(url: str) -> str:
     from playwright.sync_api import sync_playwright  # optional dependency
 
     proxy = os.environ.get("TICKET_PROXY") or None
+    captured: list[str] = []
+
+    def capture_json(response: Any) -> None:
+        """Keep the JSON an SPA fetches after load.
+
+        AXS renders an empty shell and pulls inventory over XHR, so the final
+        HTML contains no prices at all.  The prices are in those API responses,
+        so collect them and hand them to the same parser as the page.
+        """
+        try:
+            if "json" not in (response.headers or {}).get("content-type", ""):
+                return
+            if response.request.resource_type not in ("xhr", "fetch"):
+                return
+            body = response.text()
+        except Exception:  # body already discarded, or a redirect with no body
+            return
+        if body and len(body) < 2_000_000:
+            captured.append(body)
+
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             headless=True,
@@ -274,13 +294,28 @@ def browser_fetch(url: str) -> str:
                 timezone_id="America/Chicago",
                 viewport={"width": 1440, "height": 900},
             )
+            page.on("response", capture_json)
             page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-            # Anti-bot interstitials resolve themselves a beat after load, and
-            # prices are often injected after the initial paint.
+            try:
+                page.wait_for_load_state("networkidle", timeout=20_000)
+            except Exception:
+                pass  # a page that never goes idle is still worth reading
+            # Anti-bot interstitials resolve a beat after load, and prices are
+            # often injected well after the initial paint.
             page.wait_for_timeout(6_000)
-            return page.content()
+            document = page.content()
         finally:
             browser.close()
+
+    if captured:
+        logging.info("Captured %d JSON response(s) from %s.", len(captured), url)
+        # "</" inside a JSON string would close the script tag early; "\/" is a
+        # valid JSON escape for "/", so the payload still parses.
+        escaped = (body.replace("</", r"<\/") for body in captured)
+        document += "".join(
+            '<script type="application/json">' + body + "</script>" for body in escaped
+        )
+    return document
 
 
 def fetch(url: str) -> str:
@@ -348,6 +383,22 @@ def previous_offers(state: dict[str, Any]) -> dict[str, float]:
         if price is not None:
             prices[str(label)] = price
     return prices
+
+
+def dump_unparsed(source: str, page: str) -> None:
+    """Log enough about an unparsable page to fix the extractor next run.
+
+    A page that loads but yields no prices is a parser problem, not a block,
+    and the two need very different fixes -- so say which one this is.
+    """
+    title = re.search(r"<title[^>]*>(.*?)</title>", page, re.I | re.S)
+    dollars = PRICE_PATTERN.findall(page)
+    logging.warning(
+        "%s: %d bytes, title %r, %d '$' figure(s) in the markup.",
+        source, len(page), title.group(1).strip()[:90] if title else "none", len(dollars),
+    )
+    if dollars:
+        logging.warning("%s: sample figures %s", source, sorted(set(dollars))[:12])
 
 
 def should_warn(failures: int) -> bool:
@@ -620,7 +671,8 @@ def main() -> int:
     errors: dict[str, str] = {}
     for source, url in sources.items():
         try:
-            found = extract_offers(fetch(url))
+            page = fetch(url)
+            found = extract_offers(page)
         except Exception as exc:  # one blocked site must not sink the others
             errors[source] = str(exc)
             logging.warning("%s could not be read: %s", source, exc)
@@ -628,6 +680,7 @@ def main() -> int:
         if not found:
             errors[source] = "page loaded but no prices could be parsed"
             logging.warning("%s: no prices found; markup may have changed.", source)
+            dump_unparsed(source, page)
         # Namespace by source so "AXS: General Admission" and the resale floors
         # are tracked, diffed, and reported as separate series.
         for label, offer in found.items():

@@ -59,6 +59,17 @@ class ExtractOffers(unittest.TestCase):
         self.assertEqual(offers["Listed price (from)"].price, 53.0)
         self.assertEqual(offers["Listed price (to)"].price, 256.0)
 
+    def test_reads_captured_xhr_json_containing_a_closing_script_tag(self):
+        # browser_fetch appends captured API bodies as <script type=application/json>;
+        # "</" is escaped to "<\/" so an embedded "</script>" cannot end the tag early.
+        import json as _json
+        blob = _json.dumps({"offers": [{"name": "GA", "price": 62.0,
+                                        "blurb": "read </script> first"}]})
+        page = ("<html><body>shell</body></html>"
+                '<script type="application/json">'
+                + blob.replace("</", r"<\/") + "</script>")
+        self.assertEqual(tw.extract_offers(page)["GA"].price, 62.0)
+
     def test_no_prices_yields_no_offers(self):
         self.assertEqual(tw.extract_offers("<html><body>TBA</body></html>"), {})
 
