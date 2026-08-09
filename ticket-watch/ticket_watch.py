@@ -96,6 +96,10 @@ CHALLENGE_MARKERS = (
     "captcha-delivery",
     "verify you are a human",
     "are you a robot",
+    # AXS answers a datacenter IP with a full 154KB branded "AXS Access Info"
+    # page -- big enough to clear the size check and with no other tell, so it
+    # has to be matched by name or it reads as a real page with no prices.
+    "axs access info",
 )
 # A real AXS event page is well over this; challenge interstitials are a few KB.
 MIN_PAGE_BYTES = 20_000

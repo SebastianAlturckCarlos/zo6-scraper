@@ -113,6 +113,20 @@ Each alert email also carries an **"Old price held"** column: how long the price
 being replaced had stood. A tier that holds for eight hours and a tier that
 holds for twenty minutes are telling you very different things about demand.
 
+## What actually works from GitHub Actions
+
+Measured, not assumed — from runs 2 and 3 on `main`:
+
+| Source | From a GitHub runner | Notes |
+| --- | --- | --- |
+| **Vivid Seats** | works over plain HTTP | 5 price series, resale floor + range |
+| **AXS** | **blocked** | 403, then a 154KB "AXS Access Info" block page in Chromium |
+| **SeatGeek** | **blocked** | 403, then a 1.5KB challenge page in Chromium |
+
+So CI gives you the **resale** picture, which answers "is this going to sell
+out" but not "what does the primary tier cost". For AXS you need a residential
+IP: run the watcher locally, or set `TICKET_PROXY`.
+
 ## When AXS blocks the runner
 
 AXS sits behind an anti-bot layer that scores both TLS fingerprint and IP

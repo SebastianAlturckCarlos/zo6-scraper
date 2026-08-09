@@ -104,6 +104,12 @@ class BlockDetection(unittest.TestCase):
         self.assertTrue(tw.looks_blocked(
             self.FakeResponse(200, "Just a moment..." + "x" * 50_000)))
 
+    def test_axs_branded_block_page_is_a_block_despite_its_size(self):
+        # AXS serves 154KB titled "AXS Access Info" to datacenter IPs; without
+        # this marker it clears the size check and reads as a priceless page.
+        page = "<title>AXS Access Info</title>" + ("filler " * 30_000)
+        self.assertTrue(tw.looks_blocked(self.FakeResponse(200, page)))
+
     def test_a_real_page_is_not_a_block(self):
         self.assertFalse(tw.looks_blocked(self.FakeResponse(200, "ticket " * 10_000)))
 
