@@ -19,8 +19,8 @@ It emails you when:
 
 - **a tier's price changes** by at least `$1` (drops are listed first, in the
   subject line, and coloured green);
-- **a tier appears or disappears** — on a near-sold-out show, "General
-  Admission — no longer listed" is the important signal;
+- **a tier appears or disappears** — "General Admission — no longer listed" is
+  the signal that matters most;
 - **the cheapest ticket hits a target** you set (optional, off by default);
 - **it can't read the page** three runs in a row, so the watcher never goes
   quiet on you while prices are actually moving.
@@ -62,6 +62,7 @@ pip install -r ticket-watch/requirements.txt
 python ticket-watch/ticket_watch.py --show      # print prices, change nothing
 python ticket-watch/ticket_watch.py --dry-run   # compare, print, send no email
 python ticket-watch/ticket_watch.py             # normal run: email + save state
+python ticket-watch/ticket_watch.py --history   # summarise the snapshots, offline
 
 cd ticket-watch && python -m unittest test_ticket_watch   # offline tests
 ```
@@ -69,12 +70,48 @@ cd ticket-watch && python -m unittest test_ticket_watch   # offline tests
 The first run only records a baseline — you get the first email on the run
 *after* that, when there is something to compare against.
 
-## State
+## State and history
 
-`ticket_prices.json` holds the last seen price per tier, the cheapest price, the
-last check time, and the current failure streak. The workflow commits it after
-each run, so the price history is visible in the file's git log. Delete it to
-reset the baseline.
+`ticket_prices.json` holds the last seen price per tier, when that price was
+first seen, the cheapest price, the last check time, and the current failure
+streak. `price_history.jsonl` gets one appended snapshot per successful run. The
+workflow commits both, so the record survives between runs.
+
+Delete `ticket_prices.json` to reset the alert baseline; delete
+`price_history.jsonl` to reset the history.
+
+## Reading the history: can you tell how fast it's selling?
+
+Not directly. **No public source publishes sales velocity** — not AXS, not the
+venue, not the resale sites. There is no ticket-count endpoint to read and no
+honest way to derive one from a price. Anything claiming a live "only 4 left!"
+number on a page like this is marketing copy, not inventory.
+
+What the snapshot log gives you is the *shape of the inventory over time*, which
+is the closest available proxy:
+
+```
+$ python ticket-watch/ticket_watch.py --history
+36 snapshot(s), 2026-08-09T20:00:00+00:00 -> 2026-08-10T14:00:00+00:00
+cheapest ever $62.00, dearest cheapest $68.00, now $62.00
+
+General Admission: $62.00 -> $62.00  [2 move(s), 1 up / 1 down; still listed]
+The Patio: $256.00 -> $256.00        [steady; still listed]
+```
+
+Read it like this:
+
+- **Tiers stepping up, repeatedly, with short holds** → inventory is selling
+  through. Buy.
+- **Prices flat for a day or more, nothing disappearing** → it is not selling
+  out. Waiting costs you nothing, and day-of resale is where a real discount
+  would come from.
+- **A tier vanishing** → that price is gone for good; the primary floor just
+  moved up.
+
+Each alert email also carries an **"Old price held"** column: how long the price
+being replaced had stood. A tier that holds for eight hours and a tier that
+holds for twenty minutes are telling you very different things about demand.
 
 ## When AXS blocks the runner
 
@@ -96,10 +133,16 @@ without one, run the script from your own machine on a schedule instead:
 
 ## A caveat worth knowing before you wait
 
-The watcher tells you *that* a price moved; it can't make a price move. On AXS,
-**primary** inventory for a near-sold-out show is tiered — as the cheap tiers
-sell out the listed price steps **up**, and the cheapest tier disappears rather
-than getting cheaper. Meaningful downward movement generally comes from AXS
-Official Resale, where other fans reprice, and that mostly happens in the last
-hours before doors — by which point the cheap primary tier is usually gone.
-Treat a drop alert as a short window, not a trend.
+The watcher tells you *that* a price moved; it can't make a price move.
+
+On AXS, **primary** inventory is tiered: as cheap tiers sell, the listed price
+steps up and the cheapest tier disappears rather than getting cheaper. So
+waiting rarely lowers the *primary* price. Meaningful downward movement comes
+from AXS Official Resale, where other fans reprice, and that concentrates in the
+last hours before doors.
+
+Whether that's a good bet depends entirely on whether the show is actually
+scarce, and KC Live! is an ~8,000-capacity outdoor block, not a small club — the
+Hot Country Nights series has historically run free-for-21+ nights with a cover
+for under-21s. Let the history log answer it rather than guessing: if tiers sit
+flat for a day, the scarcity story is wrong and waiting is cheap.

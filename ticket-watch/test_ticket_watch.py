@@ -97,6 +97,26 @@ class BlockDetection(unittest.TestCase):
         self.assertFalse(tw.looks_blocked(self.FakeResponse(200, "ticket " * 10_000)))
 
 
+class Durations(unittest.TestCase):
+    def test_formats_minutes_hours_and_days(self):
+        self.assertEqual(tw.format_duration(45 * 60), "45m")
+        self.assertEqual(tw.format_duration(6 * 3600 + 12 * 60), "6h 12m")
+        self.assertEqual(tw.format_duration(3 * 86400 + 4 * 3600), "3d 4h")
+
+    def test_held_for_handles_naive_stamps_and_junk(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
+        self.assertEqual(tw.held_for("2026-08-09T06:00:00", now), "6h 0m")
+        self.assertEqual(tw.held_for("2026-08-09T06:00:00+00:00", now), "6h 0m")
+        self.assertEqual(tw.held_for("not a date", now), "")
+        self.assertEqual(tw.held_for(None, now), "")
+
+    def test_stored_since_reads_only_well_formed_entries(self):
+        state = {"offers": {"GA": {"price": 62.0, "since": "2026-08-09T06:00:00+00:00"},
+                            "Patio": {"price": 256.0}, "Junk": "nope"}}
+        self.assertEqual(tw.stored_since(state), {"GA": "2026-08-09T06:00:00+00:00"})
+
+
 class EmailBodies(unittest.TestCase):
     def test_drop_email_names_the_drop_and_escapes_input(self):
         changes = [tw.Change("GA & Lawn <b>", 53.0, 40.0)]
@@ -106,6 +126,14 @@ class EmailBodies(unittest.TestCase):
         self.assertIn("GA &amp; Lawn &lt;b&gt;", body_html)
         self.assertNotIn("<b>", body_html)
         self.assertIn("$40.00", body_text)
+
+    def test_held_column_shows_a_duration_or_a_dash(self):
+        changes = [tw.Change("GA", 62.0, 55.0), tw.Change("Patio", 256.0, 275.0)]
+        _, body_html, _ = tw.price_change_email(
+            "Show", "https://example.test/e", changes, 55.0, {"GA": "6h 12m"})
+        self.assertIn("<td>6h 12m</td>", body_html)
+        self.assertIn("<td>&mdash;</td>", body_html)
+        self.assertNotIn("&amp;mdash;", body_html)
 
 
 if __name__ == "__main__":

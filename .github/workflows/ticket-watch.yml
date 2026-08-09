@@ -50,13 +50,14 @@ jobs:
 
       - name: Save the recorded prices
         run: |
-          if [ -z "$(git status --porcelain -- ticket-watch/ticket_prices.json)" ]; then
+          state="ticket-watch/ticket_prices.json ticket-watch/price_history.jsonl"
+          if [ -z "$(git status --porcelain -- $state)" ]; then
             echo "No price changes to commit."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add ticket-watch/ticket_prices.json
+          git add $state
           git commit -m "chore: update watched AXS ticket prices"
           for attempt in 1 2 3 4; do
             if git push; then exit 0; fi

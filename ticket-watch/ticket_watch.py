@@ -42,6 +42,10 @@ DEFAULT_EVENT_NAME = "Tucker Wetmore - Hot Country Nights, KC Live! (Thu Aug 13)
 DEFAULT_RECIPIENT = "sebastianrhoton@gmail.com"
 
 STATE_FILE = Path(__file__).with_name("ticket_prices.json")
+# Append-only snapshot log.  Nobody publishes how fast an event is selling, so
+# the next best thing is the shape of the inventory over time: a tier stepping
+# up, or vanishing, is demand becoming visible after the fact.
+HISTORY_FILE = Path(__file__).with_name("price_history.jsonl")
 
 # Ignore sub-dollar noise so rounding differences in AXS's markup do not send
 # mail; a real tier change is always at least a dollar.
@@ -267,6 +271,101 @@ def previous_offers(state: dict[str, Any]) -> dict[str, float]:
     return prices
 
 
+def stored_since(state: dict[str, Any]) -> dict[str, str]:
+    """When each tier's current price was first seen, from the saved state."""
+    stored = state.get("offers")
+    if not isinstance(stored, dict):
+        return {}
+    return {
+        str(label): str(value["since"])
+        for label, value in stored.items()
+        if isinstance(value, dict) and value.get("since")
+    }
+
+
+def format_duration(seconds: float) -> str:
+    """A short human duration: "3d 4h", "6h 12m", "45m"."""
+    minutes = max(0, int(seconds // 60))
+    days, minutes = divmod(minutes, 1440)
+    hours, minutes = divmod(minutes, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+def held_for(since_iso: str | None, now: datetime) -> str:
+    """How long a price has stood, for the "Held" column in the alert."""
+    if not since_iso:
+        return ""
+    try:
+        since = datetime.fromisoformat(since_iso)
+    except ValueError:
+        return ""
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    return format_duration((now - since).total_seconds())
+
+
+def append_history(offers: dict[str, Offer], cheapest: float | None, now: datetime) -> None:
+    """Append one snapshot; a corrupt or unwritable log must not break the run."""
+    record = {
+        "at": now.isoformat(timespec="seconds"),
+        "cheapest": cheapest,
+        "tiers": len(offers),
+        "offers": {label: offer.as_json() for label, offer in sorted(offers.items())},
+    }
+    try:
+        with HISTORY_FILE.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+    except OSError as exc:
+        logging.warning("Could not append to %s: %s", HISTORY_FILE.name, exc)
+
+
+def summarise_history() -> int:
+    """Print what the snapshot log says about how inventory has moved."""
+    if not HISTORY_FILE.exists():
+        print("No history yet: the watcher has not completed a successful run.")
+        return 0
+    records = []
+    for line in HISTORY_FILE.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    if not records:
+        print("No readable snapshots in the history log.")
+        return 0
+
+    first, last = records[0], records[-1]
+    print(f"{len(records)} snapshot(s), {first['at']} -> {last['at']}")
+    cheapest_seen = [record["cheapest"] for record in records
+                     if isinstance(record.get("cheapest"), (int, float))]
+    if cheapest_seen:
+        print(f"cheapest ever {money(min(cheapest_seen))}, "
+              f"dearest cheapest {money(max(cheapest_seen))}, "
+              f"now {money(last['cheapest']) if last.get('cheapest') else 'n/a'}")
+
+    # Per tier: how many times the price moved, and in which direction.
+    history: dict[str, list[float]] = {}
+    for record in records:
+        for label, value in (record.get("offers") or {}).items():
+            price = parse_price(value.get("price") if isinstance(value, dict) else value)
+            if price is not None:
+                history.setdefault(label, []).append(price)
+    print()
+    for label, prices in sorted(history.items()):
+        steps = sum(1 for a, b in zip(prices, prices[1:]) if a != b)
+        ups = sum(1 for a, b in zip(prices, prices[1:]) if b > a)
+        trend = "steady" if not steps else f"{steps} move(s), {ups} up / {steps - ups} down"
+        present = "still listed" if label in (last.get("offers") or {}) else "NO LONGER LISTED"
+        print(f"{label}: {money(prices[0])} -> {money(prices[-1])}  [{trend}; {present}]")
+    return 0
+
+
 @dataclass(frozen=True)
 class Change:
     label: str
@@ -319,8 +418,9 @@ def send_email(subject: str, body_html: str, body_text: str) -> None:
     logging.info("Emailed %s: %s", recipient, subject)
 
 
-def change_rows(changes: list[Change]) -> str:
+def change_rows(changes: list[Change], held: dict[str, str] | None = None) -> str:
     arrows = {"down": "&#9660; down", "up": "&#9650; up", "new": "new", "gone": "no longer listed"}
+    held = held or {}
     rows = []
     for change in changes:
         old = money(change.old) if change.old is not None else "&mdash;"
@@ -331,13 +431,15 @@ def change_rows(changes: list[Change]) -> str:
             "<tr>"
             f"<td>{html.escape(change.label)}</td><td>{old}</td><td>{new}</td>"
             f"<td style='color:{colour}'>{delta} ({arrows[change.kind]})</td>"
+            f"<td>{html.escape(held[change.label]) if held.get(change.label) else '&mdash;'}</td>"
             "</tr>"
         )
     return "".join(rows)
 
 
 def price_change_email(event_name: str, event_url: str, changes: list[Change],
-                       cheapest: float | None) -> tuple[str, str, str]:
+                       cheapest: float | None,
+                       held: dict[str, str] | None = None) -> tuple[str, str, str]:
     drops = [change for change in changes if change.kind == "down"]
     headline = (
         f"{len(drops)} price drop(s) on {event_name}" if drops
@@ -351,11 +453,12 @@ def price_change_email(event_name: str, event_url: str, changes: list[Change],
         f"<html><body><h2>{html.escape(headline)}</h2>"
         f"<p><strong>{html.escape(cheapest_line)}</strong></p>"
         "<table border='1' cellpadding='7' cellspacing='0'><thead><tr>"
-        "<th>Ticket</th><th>Was</th><th>Now</th><th>Change</th>"
-        f"</tr></thead><tbody>{change_rows(changes)}</tbody></table>"
+        "<th>Ticket</th><th>Was</th><th>Now</th><th>Change</th><th>Old price held</th>"
+        f"</tr></thead><tbody>{change_rows(changes, held)}</tbody></table>"
         f"<p><a href=\"{html.escape(event_url, quote=True)}\">Open the AXS event page</a></p>"
-        "<p style='color:#666;font-size:12px'>Primary inventory on a near-sold-out "
-        "show usually steps up, not down &mdash; treat a drop as a short window.</p>"
+        "<p style='color:#666;font-size:12px'>\"Old price held\" is how long the "
+        "previous price stood. Short holds and repeated upward steps mean tiers "
+        "are selling through; long holds mean they are not.</p>"
         "</body></html>"
     )
     lines = [headline, cheapest_line, ""]
@@ -400,9 +503,14 @@ def main() -> int:
                         help="print what would be sent and do not email or write state")
     parser.add_argument("--show", action="store_true",
                         help="print the prices found and exit without comparing")
+    parser.add_argument("--history", action="store_true",
+                        help="summarise the recorded snapshots and exit (no network)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    if args.history:
+        return summarise_history()
 
     event_url = os.environ.get("EVENT_URL") or DEFAULT_EVENT_URL
     event_name = os.environ.get("EVENT_NAME") or DEFAULT_EVENT_NAME
@@ -438,9 +546,14 @@ def main() -> int:
         if args.show:
             return 0
 
+    now = datetime.now(timezone.utc)
     previous = previous_offers(state)
+    since = stored_since(state)
     first_run = not previous
     changes = diff_offers(previous, current, threshold)
+    # How long the price we are replacing had stood: the closest thing to a
+    # sales-rate signal that a public page exposes.
+    held = {change.label: held_for(since.get(change.label), now) for change in changes}
 
     if first_run:
         logging.info("First run: recorded %d price(s), cheapest %s.",
@@ -448,7 +561,7 @@ def main() -> int:
     elif changes:
         logging.info("%d change(s) detected.", len(changes))
         if not args.dry_run:
-            send_email(*price_change_email(event_name, event_url, changes, cheapest))
+            send_email(*price_change_email(event_name, event_url, changes, cheapest, held))
     else:
         logging.info("No change beyond %s (cheapest %s).", money(threshold),
                      money(cheapest) if cheapest is not None else "n/a")
@@ -468,16 +581,25 @@ def main() -> int:
             print(f"would report: {change.label}: {change.old} -> {change.new}")
         return 0
 
+    stamp = now.isoformat(timespec="seconds")
     state.update({
         "event_url": event_url,
         "event_name": event_name,
-        "last_checked": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "last_checked": stamp,
         "consecutive_failures": 0,
         "cheapest": cheapest,
-        "offers": {label: offer.as_json() for label, offer in sorted(offers.items())},
+        # "since" carries forward while a price stands, so the next change can
+        # report how long the old one lasted.
+        "offers": {
+            label: dict(offer.as_json(),
+                        since=since.get(label, stamp)
+                        if previous.get(label) == offer.price else stamp)
+            for label, offer in sorted(offers.items())
+        },
     })
     state.pop("last_error", None)
     save_state(state)
+    append_history(offers, cheapest, now)
     return 0
 
 
