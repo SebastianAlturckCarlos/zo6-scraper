@@ -1,9 +1,9 @@
 {
-  "cheapest": 26.24,
+  "cheapest": 33.24,
   "consecutive_failures": 0,
   "event_name": "Tucker Wetmore - Hot Country Nights, KC Live! (Thu Aug 13)",
   "event_url": "https://www.axs.com/events/1378791/coors-light-hot-country-nights-tucker-wetmore-tickets",
-  "last_checked": "2026-08-14T12:59:11+00:00",
+  "last_checked": "2026-08-14T14:17:42+00:00",
   "offers": {
     "VividSeats: 2026 RedWest Country Music Festival - 2 Day Pass (10/16 - 10/17) (Ella Langley, ": {
       "availability": "",
@@ -27,13 +27,13 @@
     },
     "VividSeats: Ticket": {
       "availability": "InStock",
-      "price": 36.9,
-      "since": "2026-08-14T12:59:11+00:00"
+      "price": 46.12,
+      "since": "2026-08-14T14:17:42+00:00"
     },
     "VividSeats: Ticket (from)": {
       "availability": "InStock",
-      "price": 36.9,
-      "since": "2026-08-14T12:59:11+00:00"
+      "price": 46.12,
+      "since": "2026-08-14T14:17:42+00:00"
     },
     "VividSeats: Ticket (to)": {
       "availability": "InStock",
@@ -42,8 +42,8 @@
     },
     "VividSeats: Tucker Wetmore": {
       "availability": "",
-      "price": 26.24,
-      "since": "2026-08-14T12:59:11+00:00"
+      "price": 33.24,
+      "since": "2026-08-14T14:17:42+00:00"
     },
     "VividSeats: Tucker Wetmore with Braxton Keith": {
       "availability": "",
