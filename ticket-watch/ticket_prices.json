@@ -1,19 +1,19 @@
 {
-  "cheapest": 81.0,
+  "cheapest": 401.0,
   "consecutive_failures": 0,
   "event_name": "Tucker Wetmore - Hot Country Nights, KC Live! (Thu Aug 13)",
   "event_url": "https://www.axs.com/events/1378791/coors-light-hot-country-nights-tucker-wetmore-tickets",
-  "last_checked": "2026-08-14T00:07:45+00:00",
+  "last_checked": "2026-08-14T03:06:36+00:00",
   "offers": {
     "VividSeats: Ticket": {
       "availability": "InStock",
-      "price": 111.13,
-      "since": "2026-08-14T00:07:45+00:00"
+      "price": 543.25,
+      "since": "2026-08-14T03:06:36+00:00"
     },
     "VividSeats: Ticket (from)": {
       "availability": "InStock",
-      "price": 111.13,
-      "since": "2026-08-14T00:07:45+00:00"
+      "price": 543.25,
+      "since": "2026-08-14T03:06:36+00:00"
     },
     "VividSeats: Ticket (to)": {
       "availability": "InStock",
@@ -22,8 +22,8 @@
     },
     "VividSeats: Tucker Wetmore": {
       "availability": "",
-      "price": 81.0,
-      "since": "2026-08-14T00:07:45+00:00"
+      "price": 401.0,
+      "since": "2026-08-14T03:06:36+00:00"
     }
   }
 }
