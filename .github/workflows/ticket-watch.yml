@@ -1,10 +1,12 @@
 name: AXS ticket price watch
 
+# The Tucker Wetmore show was 13 Aug 2026 and has passed, so the schedule is
+# switched off: no cron, manual runs only.  To watch another event, set the
+# EVENT_URL / EVENT_NAME variables, update SOURCES in ticket_watch.py, delete
+# ticket_prices.json to clear the baseline, and restore the cron line below:
+#   schedule:
+#     - cron: "*/30 * * * *"
 on:
-  schedule:
-    # Every 30 minutes. GitHub delays scheduled runs under load, so treat this
-    # as "about twice an hour" rather than an exact clock.
-    - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
       test_email:

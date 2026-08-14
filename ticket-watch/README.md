@@ -1,5 +1,11 @@
 # AXS ticket price watch
 
+> **Stopped.** The Tucker Wetmore show was 13 Aug 2026. The cron schedule is
+> removed, so nothing runs and no mail is sent; the workflow can still be
+> started by hand from the Actions tab. `price_history.jsonl` keeps the 96
+> snapshots from 9-14 Aug. See "Reusing this for another event" at the bottom.
+
+
 Emails **sebastianrhoton@gmail.com** whenever the ticket prices move on one AXS
 event page. Set up for:
 
@@ -160,3 +166,37 @@ scarce, and KC Live! is an ~8,000-capacity outdoor block, not a small club — t
 Hot Country Nights series has historically run free-for-21+ nights with a cover
 for under-21s. Let the history log answer it rather than guessing: if tiers sit
 flat for a day, the scarcity story is wrong and waiting is cheap.
+
+## Reusing this for another event
+
+Nothing here is Tucker-specific except the URLs and the saved state:
+
+1. Point `SOURCES` in `ticket_watch.py` at the new event's pages (or set the
+   `EVENT_URL` / `EVENT_NAME` variables to change the AXS page and subject).
+2. Delete `ticket_prices.json` and `price_history.jsonl` so the baseline and
+   history start clean — otherwise the first run diffs the new event against
+   the old one and mails a page of nonsense.
+3. Restore the `schedule:` block in `.github/workflows/ticket-watch.yml`.
+
+## What the 9-14 Aug run actually showed
+
+The Vivid Seats resale floor for the KC show, from the snapshot log:
+
+| When | Floor |
+| --- | --- |
+| Sun 9 Aug (start) | $62.72 |
+| Mon 10 Aug | dipped to **$49.00** |
+| Tue 11 Aug | back to $75 |
+| Wed 12 Aug | peaked **$89.00** |
+| Thu 13 Aug, show day | drifted $71 → **$62.00** by 6pm |
+
+So the floor oscillated between roughly $49 and $89 and finished where it
+started. The day-of collapse this was built to catch did not happen.
+
+**Caveat on anything after 14 Aug 05:00 UTC:** once the show passed, the Vivid
+Seats page began listing *other* Tucker Wetmore dates (RedWest, St. Pete Country
+Fest), and the watcher tracked those as if they were the same event — which is
+why the log shows a $401 spike and then a $26-33 "floor". Those rows are a
+different show. A watcher pointed at an event page has no idea the event is
+over; that is a real limitation, not a glitch, and it is the reason to stop it
+rather than leave it running.
